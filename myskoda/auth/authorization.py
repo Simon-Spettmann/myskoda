@@ -8,7 +8,7 @@ from asyncio import Lock
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import jwt
 from aiohttp import ClientSession, FormData, InvalidUrlClientError
@@ -239,7 +239,8 @@ class Authorization(ABC):
                     if "terms-and-conditions" in location:
                         raise TermsAndConditionsError(location)
                     if "consent/marketing" in location:
-                        raise MarketingConsentError(location)
+                        location = self._handle_marketing_consent(location)
+                        continue
                     async with self.session.get(location, allow_redirects=False) as response:
                         location = response.headers["Location"]
         except InvalidUrlClientError:
@@ -254,6 +255,28 @@ class Authorization(ABC):
         except (KeyError, TypeError) as err:
             message = f"Failed to extract authorization code from {location}"
             raise AuthorizationError(message) from err
+
+    def _handle_marketing_consent(self, url: str) -> str:
+        """Handle the VW Group marketing consent page.
+
+        The marketing consent endpoint only accepts GET requests. The callback
+        URL embedded in the query string is the continuation of the OAuth flow,
+        so we extract it and follow the redirect chain from there.
+
+        This does NOT accept marketing consent - it follows the "skip" or "continue"
+        path that allows authentication to proceed without giving consent.
+
+        Raises:
+            MarketingConsentError: If the marketing consent page cannot be handled automatically
+        """
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        callback = qs.get("callback", [None])[0]
+        if callback:
+            _LOGGER.info("Encountered marketing consent page, skipping automatically")
+            return callback
+        # If no callback found, raise the original error for backward compatibility
+        raise MarketingConsentError(url)
 
     async def _exchange_auth_code_for_idk_session(self, code: str, verifier: str) -> IDKSession:
         """Exchange the ident login code for an auth token from Skoda.
@@ -432,7 +455,7 @@ class TermsAndConditionsError(Exception):
 
 
 class MarketingConsentError(Exception):
-    """Redirect to Marketing Consent encountered."""
+    """Redirect to Marketing Consent encountered. Automatic skipping was not possible."""
 
 
 class BrandError(Exception):
